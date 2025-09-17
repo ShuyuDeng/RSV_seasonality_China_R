@@ -1,7 +1,4 @@
-library(stringr)
-library(psych)
-library(pROC)
-
+# Fit a LOESS model
 callLoess <- function(dataset, variables, span) {
   loess(formula = as.formula(
           paste("AAP ~", str_c(variables, collapse = "+"), sep = "")),
@@ -9,12 +6,14 @@ callLoess <- function(dataset, variables, span) {
         span = span)
 }
 
+# Retrieve density value from KDE grid
 calcKDE <- function(datapoint) {
   x_index <- which.min(abs(kde.grid$x - datapoint["TEMPc"]))
   y_index <- which.min(abs(kde.grid$y - datapoint["AHc"]))
   return(kde.grid$z[x_index, y_index])
 }
 
+# Predict AAP based on mean-centred temperature and absolute humidity
 predictAAP <- function(TEMPc, AHc) {
   density <- calcKDE(c(TEMPc = TEMPc, AHc = AHc))
   if (density > 0) {
@@ -26,6 +25,7 @@ predictAAP <- function(TEMPc, AHc) {
   }
 }
 
+# Find the optimal threshold for predicting epidemic months
 findThreshold <- function(dataset, variables = c("TEMPc", "AHc"), span = 0.3) {
   # Extract unique sites
   listOfSamples <- unique(dataset$Site)
@@ -81,6 +81,7 @@ findThreshold <- function(dataset, variables = c("TEMPc", "AHc"), span = 0.3) {
  return(df2)
 }
 
+# Predict epidemic months for a given site based on cumulative AAP
 predictEpi <- function(site, threshold) {
   site <- site[order(site$pred.AAP, decreasing = TRUE),]
   site$cumAAP <- cumsum(site$pred.AAP)
@@ -89,6 +90,8 @@ predictEpi <- function(site, threshold) {
   return(site)
 }
 
+# Determine RSV season onset
+# It can work at different levels: city, province, or study, and supports both predicted AAP and observed AAP.
 getSeasonOnset <- function(df, level) {
   
   AAP_col <- if ("pred.AAP" %in% names(df)) {
@@ -155,6 +158,7 @@ getSeasonOnset <- function(df, level) {
   return(df)
 }
 
+# Plot RSV epidemic status maps for all months, including insets for Hong Kong and Macao
 plotRSVmap <- function(df, chinamap) {
   
   month_names <- c("January", "February", "March", "April", "May", "June", 
@@ -256,8 +260,10 @@ plotRSVmap <- function(df, chinamap) {
   }
 }
 
+# Generate a standalone legend for RSV epidemic status maps
 plotLegend <- function() {
-
+  
+  # Create dummy data for plotting legend
   dummy_data <- data.frame(
     x = 1:4,
     y = 1:4,
@@ -267,6 +273,7 @@ plotLegend <- function() {
                     levels = c("Observed", "Predicted"))
   )
   
+  # Construct legend plot
   legend_plot <- ggplot(dummy_data, aes(x = x, y = y, fill = Status, alpha = Source)) +
     geom_bar(stat = "identity") +
     scale_fill_manual(values = c("Onset" = "#F0BB41", 
@@ -285,6 +292,7 @@ plotLegend <- function() {
           legend.box.just = "center",
           legend.key = element_rect(color = "black")) 
   
+  # Extract the legend grob
   grobs <- ggplotGrob(legend_plot)
   legend_grob <- gtable::gtable_filter(grobs, "guide-box-bottom")
   
@@ -294,4 +302,127 @@ plotLegend <- function() {
   dev.off()
   
 }
+
+# Process a single StudySiteID: predict epidemic months for each study year
+processStudySiteID <- function(eachStudySiteID, weather_list, studyyear) {
+  
+  # Filter meteorological data for the specific StudySiteID
+  weather_StudySiteID <- weather_list[[eachStudySiteID]] %>%
+    mutate(StudySiteID = eachStudySiteID)
+  
+  # Select data for each YearFrom, then combine into one dataframe
+  weather_StudySiteID_filtered <- studyyear %>%
+    filter(StudySiteID == eachStudySiteID) %>%
+    rowwise() %>%
+    do({
+      data <- filter(weather_StudySiteID, YEARMODA >= .$StartDate_lag & YEARMODA <= .$EndDate_lag)
+      mutate(data, YearFrom = .$YearFrom,
+             Latitude = .$Latitude, 
+             Longitude = .$Longitude)
+    }) %>%
+    ungroup() %>%
+    bind_rows()
+  
+  
+  # Calculate distances to study site using Vincenty ellipsoid
+  weather_StudySiteID_filtered$Distance <- distVincentyEllipsoid(
+    cbind(weather_StudySiteID_filtered$Longitude, weather_StudySiteID_filtered$Latitude),
+    cbind(weather_StudySiteID_filtered$LONGITUDE, weather_StudySiteID_filtered$LATITUDE)
+  )
+  
+  # Compute daily mean TEMP and AH for all weather stations within 50 km (interpolate if missing date <=5%)
+  weather_StudySiteID_filtered <- weather_StudySiteID_filtered %>%
+    filter(Distance <= 50000) %>%
+    mutate(AH = calcAH(RH = RH, TEMP = TEMP)) %>%
+    group_by(YearFrom, YEARMODA) %>%
+    summarise(TEMP = mean(TEMP, na.rm = TRUE),
+              AH = mean(AH, na.rm = TRUE))
+  
+  # Generate complete date sequence for each StudySiteID and YearFrom
+  complete_dates <- studyyear %>%
+    rowwise() %>%
+    mutate(CompleteDate = list(seq.Date(StartDate_lag, EndDate_lag, by = "day"))) %>%
+    ungroup() %>%
+    select(SID, StudySiteID, Location, Province, YearFrom, CompleteDate) %>%
+    unnest(CompleteDate)
+  
+  # Merge complete date sequence with filtered weather data and interpolate missing values
+  weather_StudySiteID_complete <- complete_dates %>%
+    filter(StudySiteID == eachStudySiteID) %>%
+    left_join(weather_StudySiteID_filtered, by = c("YearFrom", "CompleteDate" = "YEARMODA")) %>%
+    
+    # Calculate missing percent, retain data with missing <=5%, and perform interpolation
+    group_by(YearFrom) %>%
+    mutate(MissingPercent = (sum(is.na(TEMP) | is.na(AH)) / n()) * 100) %>%
+    filter(MissingPercent <= 5) %>%
+    mutate(TEMP = na_interpolation(TEMP, option = "spline"),
+           AH = na_interpolation(AH, option = "spline")) %>%
+    select(-MissingPercent) %>%
+    ungroup() %>%
+    
+    # Compute 14-day lagged year and month
+    mutate(DatePlus14 = CompleteDate + days(14),
+           Year = year(DatePlus14),
+           Month = month(DatePlus14)) %>%
+    select(-DatePlus14) %>% 
+    
+    # Compute annual average TEMP and AH for each Year, and calculate the difference between daily value and annual averages
+    group_by(YearFrom) %>%
+    mutate(TEMPa = mean(TEMP, na.rm = TRUE),
+           AHa = mean(AH, na.rm = TRUE)) %>%
+    ungroup() %>%
+    mutate(TEMPc = TEMP - TEMPa, 
+           AHc = AH - AHa) %>%
+    
+    # Compute mean-centered TEMP and AH for each year and month
+    group_by(SID, StudySiteID, Location, Province, YearFrom, Year, Month) %>%
+    summarise(TEMPc = mean(TEMPc, na.rm = TRUE),
+              AHc = mean(AHc, na.rm = TRUE)) %>%
+    ungroup() %>%
+    
+    # Use the predictAAP function to predict AAP for 12 months in each study year and normalize
+    group_by(YearFrom) %>%
+    mutate(pred.initAAP = pmap_dbl(list(TEMPc, AHc), predictAAP),
+           pred.AAP = pred.initAAP / sum(pred.initAAP) * 100) %>%
+    select(-pred.initAAP) %>%
+    ungroup() %>%
+    
+    # Filter out incomplete predictions
+    filter(!is.na(pred.AAP))
+  
+  # Determine epidemic months in each study year based on predicted AAP for 12 months and the optimal threshold (65%)
+  predictEpi_results <- weather_StudySiteID_complete %>%
+    group_by(SID, StudySiteID, Location, Province, YearFrom) %>%
+    nest() %>%
+    mutate(Epi = map(data, ~predictEpi(.x, threshold = 65))) %>%
+    select(-data) %>%
+    unnest(cols = c(Epi))
+  
+  return(predictEpi_results)
+  
+}
+
+# Process all StudySiteIDs: predict epidemic months in each study year for all study sites 
+processAllStudySiteIDs <- function(weather_list, studyyear, redo = FALSE) {
+  
+  if (redo) {
+    
+    # If redo, reprocesses all data; otherwise reads existing results
+    StudySiteIDs <- names(weather_list)
+    
+    results <- lapply(StudySiteIDs, function(eachStudySiteID) {
+      processStudySiteID(eachStudySiteID, weather_list, studyyear)
+    })
+    
+    final_result <- bind_rows(results)
+    write.csv(final_result, "results/tables/predictEpi_study_results.csv", row.names = FALSE)
+    
+    return(final_result)
+  } else {
+    
+    # Read previously saved results
+    return(read.csv("results/tables/predictEpi_study_results.csv"))
+  }
+}
+
 

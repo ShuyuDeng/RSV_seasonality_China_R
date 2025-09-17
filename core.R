@@ -1,4 +1,5 @@
 rm(list=ls())
+library(stringr)
 library(ggplot2)
 library(sf)
 library(jsonlite)
@@ -117,11 +118,10 @@ ggsave("results/figures/fig1.study_sites.pdf", final_map, width = 8, height = 6,
 # 2. Modelling----
 # 2.1 Model selection----
 # Re-run "compareModels" for model selection
-# Best model: TEMPc + AHc, span = 0.30, lag = 14d
+# Best model: TEMPc + AHc, span = 0.30, lag = 14 days
 
 # 2.2 Model fit----
-# Scatter plot of TEMPc vs. AHc
-# Show that predictors are correlated and occupy only a limited region
+# Scatter plot of TEMPc and AHc: predictors are correlated and occupy only a limited region
 plot(x = dataFinal$Lag_14$TEMPc, y = dataFinal$Lag_14$AHc,
      xlab = "TEMPc (°C)", ylab = "AHc (g/m³)")
 
@@ -240,7 +240,7 @@ unique(weather_China_2019$Province)
 #  - If missing days < 5%, perform imputation
 weather_province_2019 <- do.call(rbind, by(weather_China_2019, weather_China_2019$Province, get_weather_province_2019,
                                            redo = FALSE))
-# Check for unexpected missing Province values
+# Check for unexpected missing province values: none
 weather_province_2019[which(is.na(weather_province_2019$Province)),]
 
 # Compute mean-centred TEMP (TEMPc) and mean-centred AH (AHc), and predict AAP for each province-month
@@ -492,8 +492,8 @@ consecutive_yearfrom <- predictEpi_study %>%
   
   filter(ConsecutiveCount >= 3) %>%    # keep ≥3 consecutive years
   ungroup() %>%
-  select(-ConsecutiveDiff, -Group, -ConsecutiveCount,
-         YearFrom = UniqueYearFrom) 
+  dplyr::select(-ConsecutiveDiff, -Group, -ConsecutiveCount,
+                YearFrom = UniqueYearFrom) 
 
 # 17 studies met the criterion
 length(unique(consecutive_yearfrom$StudySiteID))
@@ -503,14 +503,14 @@ predictEpi_study_consecutive <- predictEpi_study %>%
   semi_join(consecutive_yearfrom, by = c("StudySiteID", "YearFrom")) %>%
   mutate(YearMonth = as.Date(paste(Year, Month, "01", sep = "-"))) %>%
   arrange(StudySiteID, YearFrom, YearMonth)  %>% 
-  select(SID, StudySiteID, Location, Province, YearFrom, YearMonth, Epi) %>%
+  dplyr::select(SID, StudySiteID, Location, Province, YearFrom, YearMonth, Epi) %>%
   mutate(Source = "Predicted")
 
 # Filter observed epidemic results in the same way
 RSVdata_3_consecutive <- RSVdata_3 %>%
   semi_join(consecutive_yearfrom, by = c("StudySiteID", "YearFrom")) %>%
   arrange(StudySiteID, YearFrom, YearMonth) %>% 
-  select(SID, StudySiteID, Location, Province, YearFrom, YearMonth, Epi) %>%
+  dplyr::select(SID, StudySiteID, Location, Province, YearFrom, YearMonth, Epi) %>%
   mutate(Source = "Observed")
 
 # Combine observed and predicted results
@@ -542,7 +542,7 @@ seasonality_consecutive <- combined_consecutive %>%
   group_by(StudySiteID) %>%
   mutate(ClearSeasonality = all(EpiCount <= 5)) %>%  # clear seasonality
   ungroup() %>%
-  select(-EpiCount) %>% 
+  dplyr::select(-EpiCount) %>% 
   left_join(combined_consecutive, by = c("StudySiteID", "YearFrom"))
 
 # Define color scheme
